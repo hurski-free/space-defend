@@ -68,6 +68,54 @@ let hostAimWy = Number.NaN
 const asteroids: Asteroid[] = []
 const projectiles: Projectile[] = []
 
+/** Local-only plume samples (not networked). */
+type RocketTrailPt = { x: number; y: number; t: number }
+const rocketTrailById = new Map<number, RocketTrailPt[]>()
+/** Rocket mesh + plume scale (~1.5× smaller than original). */
+const ROCKET_VIS = 2 / 3
+const ROCKET_TRAIL_MAX = 26
+const ROCKET_TRAIL_MIN_DIST_SQ = (2.8 * ROCKET_VIS) ** 2
+/** After this age (ms) trail points no longer contribute. */
+const ROCKET_PLUME_TTL_MS = 580
+/** Per-point alpha scales by life^this (stronger tail fade). */
+const ROCKET_PLUME_FADE_EXP = 2.35
+
+function rocketExhaustWorld(p: Projectile): { x: number; y: number } {
+  const spd = Math.hypot(p.vx, p.vy)
+  if (spd < 1e-6) return { x: p.x, y: p.y }
+  const k = (15 * ROCKET_VIS) / spd
+  return { x: p.x - p.vx * k, y: p.y - p.vy * k }
+}
+
+function syncRocketTrails(now: number): void {
+  const seen = new Set<number>()
+  for (const p of projectiles) {
+    if (p.dmg < ROCKET_DAMAGE) continue
+    seen.add(p.id)
+    const { x: ex, y: ey } = rocketExhaustWorld(p)
+    let trail = rocketTrailById.get(p.id)
+    if (!trail) {
+      rocketTrailById.set(p.id, [{ x: ex, y: ey, t: now }])
+      continue
+    }
+    while (trail.length && now - trail[0]!.t > ROCKET_PLUME_TTL_MS) trail.shift()
+    const last = trail[trail.length - 1]!
+    const dx = ex - last.x
+    const dy = ey - last.y
+    if (dx * dx + dy * dy >= ROCKET_TRAIL_MIN_DIST_SQ) {
+      trail.push({ x: ex, y: ey, t: now })
+      while (trail.length > ROCKET_TRAIL_MAX) trail.shift()
+    } else {
+      last.x = ex
+      last.y = ey
+      last.t = now
+    }
+  }
+  for (const id of rocketTrailById.keys()) {
+    if (!seen.has(id)) rocketTrailById.delete(id)
+  }
+}
+
 let planetHp = PLANET_HP_MAX
 let nextAstId = 1
 let spawnAcc = 0
@@ -138,6 +186,7 @@ function resetGame(): void {
   hostAimWx = Number.NaN
   hostAimWy = Number.NaN
   resetProjectileIdCounter()
+  rocketTrailById.clear()
   lastArtHost = lastRocketHost = lastArtGuest = lastRocketGuest = 0
   guestHudArt = guestHudRoc = 0
   lmbHost = false
@@ -409,6 +458,7 @@ function tick(now: number): void {
     if (planetHp <= 0) gameOver = true
   }
 
+  syncRocketTrails(now)
   draw(now)
   if (!gameOver) {
     raf = requestAnimationFrame(tick)
@@ -485,44 +535,168 @@ function draw(now: number): void {
       continue
     }
     const ang = spd > 1e-6 ? Math.atan2(p.vy, p.vx) : 0
+    const trail = rocketTrailById.get(p.id)
+    const exh = rocketExhaustWorld(p)
+
+    const plumeLife = (born: number) => {
+      const u = 1 - (now - born) / ROCKET_PLUME_TTL_MS
+      if (u <= 0) return 0
+      if (u >= 1) return 1
+      return u ** ROCKET_PLUME_FADE_EXP
+    }
+
+    if (trail && trail.length >= 1) {
+      const x0 = trail[0]!.x
+      const y0 = trail[0]!.y
+      const tailFade = plumeLife(trail[0]!.t)
+      const headFade = plumeLife(trail[trail.length - 1]!.t)
+
+      const buildPath = () => {
+        surf.beginPath()
+        surf.moveTo(x0, y0)
+        for (let i = 1; i < trail.length; i++) surf.lineTo(trail[i]!.x, trail[i]!.y)
+        surf.lineTo(exh.x, exh.y)
+      }
+
+      surf.lineJoin = 'round'
+      surf.lineCap = 'round'
+
+      buildPath()
+      surf.lineWidth = (15 * ROCKET_VIS) / worldScale
+      const gWide = surf.createLinearGradient(x0, y0, exh.x, exh.y)
+      gWide.addColorStop(0, `rgba(48, 44, 56, ${0.04 * tailFade})`)
+      gWide.addColorStop(0.18, `rgba(82, 70, 78, ${0.07 * tailFade})`)
+      gWide.addColorStop(0.42, `rgba(130, 82, 64, ${0.1 * Math.sqrt(tailFade * headFade)})`)
+      gWide.addColorStop(0.68, `rgba(255, 120, 55, ${0.28 * headFade})`)
+      gWide.addColorStop(0.9, `rgba(255, 200, 130, ${0.62 * headFade})`)
+      gWide.addColorStop(1, `rgba(255, 252, 245, ${0.88 * headFade})`)
+      surf.strokeStyle = gWide
+      surf.stroke()
+
+      buildPath()
+      surf.lineWidth = (5 * ROCKET_VIS) / worldScale
+      const gMid = surf.createLinearGradient(x0, y0, exh.x, exh.y)
+      gMid.addColorStop(0, `rgba(100, 88, 92, ${0.02 * tailFade})`)
+      gMid.addColorStop(0.35, `rgba(200, 100, 55, ${0.12 * tailFade})`)
+      gMid.addColorStop(0.72, `rgba(255, 175, 95, ${0.5 * headFade})`)
+      gMid.addColorStop(1, `rgba(255, 255, 255, ${0.92 * headFade})`)
+      surf.strokeStyle = gMid
+      surf.stroke()
+
+      buildPath()
+      surf.lineWidth = (1.65 * ROCKET_VIS) / worldScale
+      const gCore = surf.createLinearGradient(x0, y0, exh.x, exh.y)
+      gCore.addColorStop(0, `rgba(180, 160, 150, ${0.015 * tailFade})`)
+      gCore.addColorStop(0.55, `rgba(255, 220, 180, ${0.35 * headFade})`)
+      gCore.addColorStop(1, `rgba(255, 255, 255, ${0.98 * headFade})`)
+      surf.strokeStyle = gCore
+      surf.stroke()
+
+      for (let i = 0; i < trail.length; i++) {
+        const pt = trail[i]!
+        const L = plumeLife(pt.t)
+        if (L < 0.02) continue
+        const along = trail.length > 1 ? i / (trail.length - 1) : 1
+        const spread = 1 - along
+        const r = (1.8 + spread * 9) * ROCKET_VIS
+        const hot = along * along * L
+        const smoke = (1 - along) * (1 - along) * L
+        const rg = surf.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, r)
+        rg.addColorStop(0, `rgba(255, 255, 250, ${0.05 * smoke + 0.75 * hot})`)
+        rg.addColorStop(0.25, `rgba(255, 200, 120, ${0.12 * smoke + 0.38 * hot})`)
+        rg.addColorStop(0.55, `rgba(255, 95, 40, ${0.08 * smoke + 0.22 * hot})`)
+        rg.addColorStop(1, `rgba(40, 32, 38, ${0.06 * smoke})`)
+        surf.fillStyle = rg
+        surf.beginPath()
+        surf.arc(pt.x, pt.y, r, 0, Math.PI * 2)
+        surf.fill()
+      }
+
+      const coreR = (5.2 + 1.8 * headFade) * ROCKET_VIS
+      const cr = surf.createRadialGradient(exh.x, exh.y, 0, exh.x, exh.y, coreR)
+      cr.addColorStop(0, `rgba(255, 255, 255, ${0.99 * headFade})`)
+      cr.addColorStop(0.08, `rgba(255, 248, 220, ${0.95 * headFade})`)
+      cr.addColorStop(0.28, `rgba(255, 160, 70, ${0.72 * headFade})`)
+      cr.addColorStop(0.55, `rgba(255, 70, 25, ${0.35 * headFade})`)
+      cr.addColorStop(1, 'rgba(255, 30, 10, 0)')
+      surf.fillStyle = cr
+      surf.beginPath()
+      surf.arc(exh.x, exh.y, coreR, 0, Math.PI * 2)
+      surf.fill()
+
+      surf.beginPath()
+      surf.arc(exh.x, exh.y, coreR * 0.42, 0, Math.PI * 2)
+      surf.strokeStyle = `rgba(12, 6, 8, ${0.62 * headFade})`
+      surf.lineWidth = (2.1 * ROCKET_VIS) / worldScale
+      surf.stroke()
+      surf.beginPath()
+      surf.arc(exh.x, exh.y, coreR * 0.52, 0, Math.PI * 2)
+      surf.strokeStyle = `rgba(255, 200, 120, ${0.35 * headFade})`
+      surf.lineWidth = (0.85 * ROCKET_VIS) / worldScale
+      surf.stroke()
+    }
     surf.save()
     surf.translate(p.x, p.y)
     surf.rotate(ang)
-    const lw = 1.35 / worldScale
+    const v = ROCKET_VIS
+    const lw = (1.25 * v) / worldScale
     surf.lineWidth = lw
-    surf.fillStyle = 'rgba(255, 85, 40, 0.4)'
-    surf.strokeStyle = 'rgba(255, 140, 80, 0.45)'
+    surf.fillStyle = 'rgba(255, 60, 20, 0.55)'
+    surf.strokeStyle = 'rgba(255, 120, 60, 0.5)'
     surf.beginPath()
-    surf.moveTo(-14, 0)
-    surf.lineTo(-24, 5)
-    surf.lineTo(-24, -5)
+    surf.moveTo(-20 * v, 0)
+    surf.lineTo(-32 * v, 6.5 * v)
+    surf.lineTo(-30 * v, 0)
+    surf.lineTo(-32 * v, -6.5 * v)
     surf.closePath()
     surf.fill()
     surf.stroke()
-    surf.fillStyle = '#d4d8e8'
-    surf.strokeStyle = '#5c6478'
+    surf.fillStyle = 'rgba(255, 140, 40, 0.35)'
     surf.beginPath()
-    surf.moveTo(16, 0)
-    surf.lineTo(-6, 5.5)
-    surf.lineTo(-12, 2.2)
-    surf.lineTo(-12, -2.2)
-    surf.lineTo(-6, -5.5)
+    surf.ellipse(-24 * v, 0, 7 * v, 3.2 * v, 0, 0, Math.PI * 2)
+    surf.fill()
+    surf.fillStyle = '#c8d0e8'
+    surf.strokeStyle = '#4a5568'
+    surf.beginPath()
+    surf.moveTo(22 * v, 0)
+    surf.lineTo(-4 * v, 6 * v)
+    surf.lineTo(-10 * v, 3.5 * v)
+    surf.lineTo(-14 * v, 0)
+    surf.lineTo(-10 * v, -3.5 * v)
+    surf.lineTo(-4 * v, -6 * v)
     surf.closePath()
     surf.fill()
     surf.stroke()
-    surf.fillStyle = '#e85a32'
-    surf.strokeStyle = '#8a3018'
+    surf.fillStyle = '#8a96b0'
     surf.beginPath()
-    surf.moveTo(16, 0)
-    surf.lineTo(26, 0)
-    surf.lineTo(19, 3.5)
-    surf.lineTo(16, 0)
-    surf.lineTo(19, -3.5)
+    surf.moveTo(-4 * v, 6 * v)
+    surf.lineTo(-8 * v, 2 * v)
+    surf.lineTo(-8 * v, -2 * v)
+    surf.lineTo(-4 * v, -6 * v)
+    surf.lineTo(2 * v, 0)
+    surf.closePath()
+    surf.fill()
+    surf.fillStyle = '#f0652a'
+    surf.strokeStyle = '#7a2810'
+    surf.beginPath()
+    surf.moveTo(22 * v, 0)
+    surf.lineTo(30 * v, 0)
+    surf.lineTo(24 * v, 3.2 * v)
+    surf.lineTo(20 * v, 1.2 * v)
+    surf.lineTo(20 * v, -1.2 * v)
+    surf.lineTo(24 * v, -3.2 * v)
     surf.closePath()
     surf.fill()
     surf.stroke()
-    surf.fillStyle = 'rgba(70, 140, 255, 0.55)'
-    surf.fillRect(-1, -2, 9, 4)
+    surf.fillStyle = 'rgba(90, 200, 255, 0.45)'
+    surf.strokeStyle = 'rgba(40, 120, 200, 0.35)'
+    surf.beginPath()
+    surf.moveTo(14 * v, 0)
+    surf.lineTo(4 * v, 2.2 * v)
+    surf.lineTo(4 * v, -2.2 * v)
+    surf.closePath()
+    surf.fill()
+    surf.stroke()
     surf.restore()
   }
 
