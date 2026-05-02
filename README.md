@@ -7,7 +7,6 @@ Co-op arcade game: defend the planet from asteroids.
 | Environment | URL |
 |-------------|-----|
 | **Production** | [https://space-defend.onrender.com/](https://space-defend.onrender.com/) |
-| **Development** | [https://space-defend-develop.onrender.com/](https://space-defend-develop.onrender.com/) |
 
 ## Local development
 

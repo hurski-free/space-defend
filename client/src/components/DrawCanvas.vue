@@ -2,13 +2,32 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   CANVAS_CHANNEL,
+  CANVAS_WORLD_SCALE_FACTOR,
+  GUEST_INPUT_SEND_MIN_MS,
+  GUEST_PROJECTILE_RENDER_SNAP,
+  HOST_STATE_SYNC_MIN_MS,
   ORBIT_R_MAX,
   PLANET_HP_MAX,
   PLANET_RADIUS,
+  ROCKET_DAMAGE,
+  ROCKET_PLUME_FADE_EXP,
+  ROCKET_PLUME_TTL_MS,
+  ROCKET_TRAIL_MAX,
+  ROCKET_TRAIL_MIN_DIST_SQ,
+  ROCKET_VIS,
+  SHIP_ORBIT_RESET_EXTRA,
+  SHIP_ORBIT_START_EXTRA,
+  SMOOTH_SHIP_GUEST_VISUAL_RATE,
+  SMOOTH_SHIP_HOST_DISPLAY_RATE,
+  VIEW_RADIUS_PAD,
   XP_LEVEL_THRESHOLDS,
   XP_UPGRADE_ARTILLERY_DELTA_MS,
   XP_UPGRADE_ROCKET_DELTA_MS,
+} from '../game/const'
+import {
   type Asteroid,
+  asteroidModelPolygon,
+  asteroidSpawnIntervalSec,
   effectiveArtilleryCd,
   effectiveRocketCd,
   type GuestInputPayload,
@@ -19,8 +38,6 @@ import {
   type ShipXpState,
   type StateSyncPayload,
   type WeaponId,
-  packXpSyncRow,
-  ROCKET_DAMAGE,
   extrapolateGuestProjectiles,
   mergeGuestProjectilesRender,
   resetProjectileIdCounter,
@@ -31,17 +48,20 @@ import {
   integrateShip,
   isGamePayload,
   smoothShipToward,
-  packAsteroids,
-  packProjectiles,
   shipWorldPos,
   spawnAsteroid,
   tryFire,
-  unpackAsteroids,
-  unpackProjectiles,
-  unpackXpSyncRow,
   updateAsteroids,
   updateProjectiles,
 } from '../game/planetDefense'
+import {
+  packAsteroids,
+  packProjectiles,
+  packXpSyncRow,
+  unpackAsteroids,
+  unpackProjectiles,
+  unpackXpSyncRow,
+} from '../game/transport-data'
 
 const props = defineProps<{
   gameSessionId: number
@@ -53,7 +73,7 @@ const props = defineProps<{
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
-const viewPad = ORBIT_R_MAX + 140
+const viewPad = ORBIT_R_MAX + VIEW_RADIUS_PAD
 
 let ctx: CanvasRenderingContext2D | null = null
 let dpr = 1
@@ -63,10 +83,10 @@ let cx = 0
 let cy = 0
 let worldScale = 1
 
-const hostShip: Ship = { angle: 0, orbitR: (PLANET_RADIUS + ORBIT_R_MAX) / 2 + 40 }
+const hostShip: Ship = { angle: 0, orbitR: (PLANET_RADIUS + ORBIT_R_MAX) / 2 + SHIP_ORBIT_START_EXTRA }
 /** Guest client: smoothed host ship for drawing (sync target is hostShip). */
-const hostDisplay: Ship = { angle: 0, orbitR: (PLANET_RADIUS + ORBIT_R_MAX) / 2 + 40 }
-const guestShip: Ship = { angle: Math.PI, orbitR: (PLANET_RADIUS + ORBIT_R_MAX) / 2 + 40 }
+const hostDisplay: Ship = { angle: 0, orbitR: (PLANET_RADIUS + ORBIT_R_MAX) / 2 + SHIP_ORBIT_START_EXTRA }
+const guestShip: Ship = { angle: Math.PI, orbitR: (PLANET_RADIUS + ORBIT_R_MAX) / 2 + SHIP_ORBIT_START_EXTRA }
 const guestVisual: Ship = { ...guestShip }
 
 let hostAimWx = Number.NaN
@@ -78,14 +98,6 @@ const projectiles: Projectile[] = []
 /** Local-only plume samples (not networked). */
 type RocketTrailPt = { x: number; y: number; t: number }
 const rocketTrailById = new Map<number, RocketTrailPt[]>()
-/** Rocket mesh + plume scale (~1.5× smaller than original). */
-const ROCKET_VIS = 2 / 3
-const ROCKET_TRAIL_MAX = 26
-const ROCKET_TRAIL_MIN_DIST_SQ = (2.8 * ROCKET_VIS) ** 2
-/** After this age (ms) trail points no longer contribute. */
-const ROCKET_PLUME_TTL_MS = 580
-/** Per-point alpha scales by life^this (stronger tail fade). */
-const ROCKET_PLUME_FADE_EXP = 2.35
 
 function rocketExhaustWorld(p: Projectile): { x: number; y: number } {
   const spd = Math.hypot(p.vx, p.vy)
@@ -187,7 +199,7 @@ function resetGame(): void {
   planetHp = PLANET_HP_MAX
   nextAstId = 1
   spawnAcc = 0
-  const mid = (PLANET_RADIUS + ORBIT_R_MAX) / 2 + 35
+  const mid = (PLANET_RADIUS + ORBIT_R_MAX) / 2 + SHIP_ORBIT_RESET_EXTRA
   hostShip.angle = 0
   hostShip.orbitR = mid
   hostDisplay.angle = hostShip.angle
@@ -305,7 +317,7 @@ function onPeerPayload(payload: unknown): void {
     asteroids.length = 0
     asteroids.push(...na)
     const np = unpackProjectiles(p.P)
-    mergeGuestProjectilesRender(projectiles, np, 0.52)
+    mergeGuestProjectilesRender(projectiles, np, GUEST_PROJECTILE_RENDER_SNAP)
     if (typeof p.hmx === 'number' && typeof p.hmy === 'number' && Number.isFinite(p.hmx) && Number.isFinite(p.hmy)) {
       hostAimWx = p.hmx
       hostAimWy = p.hmy
@@ -358,7 +370,7 @@ watch(
 function sendGuestInput(now: number): void {
   if (props.solo || props.isHost) return
   if (guestDead) return
-  if (now - lastGuestSend < 35) return
+  if (now - lastGuestSend < GUEST_INPUT_SEND_MIN_MS) return
   lastGuestSend = now
   const ship = guestVisual
   const { x: sx, y: sy } = shipWorldPos(ship)
@@ -383,7 +395,7 @@ function sendGuestInput(now: number): void {
 
 function sendHostSync(now: number): void {
   if (props.solo || !props.isHost) return
-  if (now - lastSyncSent < 60) return
+  if (now - lastSyncSent < HOST_STATE_SYNC_MIN_MS) return
   lastSyncSent = now
   const msg: StateSyncPayload = {
     channel: CANVAS_CHANNEL,
@@ -459,7 +471,8 @@ function tick(now: number): void {
   if (props.solo) {
     if (!hostDead) integrateShip(hostShip, keysHost, dt)
     spawnAcc += dt
-    if (spawnAcc >= 2.75) {
+    const spawnEvery = asteroidSpawnIntervalSec((now - gameStartMs) / 1000)
+    if (spawnAcc >= spawnEvery) {
       spawnAcc = 0
       asteroids.push(spawnAsteroid(nextAstId++))
     }
@@ -487,7 +500,8 @@ function tick(now: number): void {
     if (!hostDead) integrateShip(hostShip, keysHost, dt)
     if (!guestDead) integrateShip(guestShip, keysGuest, dt)
     spawnAcc += dt
-    if (spawnAcc >= 2.75) {
+    const spawnEveryCoop = asteroidSpawnIntervalSec((now - gameStartMs) / 1000)
+    if (spawnAcc >= spawnEveryCoop) {
       spawnAcc = 0
       asteroids.push(spawnAsteroid(nextAstId++))
     }
@@ -518,13 +532,13 @@ function tick(now: number): void {
     extrapolateGuestProjectiles(projectiles, dt)
     if (!guestDead) {
       integrateShip(guestVisual, keysHost, dt)
-      smoothShipToward(guestVisual, guestShip, dt, 22)
+      smoothShipToward(guestVisual, guestShip, dt, SMOOTH_SHIP_GUEST_VISUAL_RATE)
     } else {
       guestVisual.angle = guestShip.angle
       guestVisual.orbitR = guestShip.orbitR
     }
     if (!hostDead) {
-      smoothShipToward(hostDisplay, hostShip, dt, 20)
+      smoothShipToward(hostDisplay, hostShip, dt, SMOOTH_SHIP_HOST_DISPLAY_RATE)
     } else {
       hostDisplay.angle = hostShip.angle
       hostDisplay.orbitR = hostShip.orbitR
@@ -573,7 +587,7 @@ function draw(now: number): void {
 
   cx = cw / 2
   cy = ch / 2
-  worldScale = (Math.min(cw, ch) * 0.42) / viewPad
+  worldScale = (Math.min(cw, ch) * CANVAS_WORLD_SCALE_FACTOR) / viewPad
 
   surf.save()
   surf.translate(cx, cy)
@@ -614,8 +628,15 @@ function draw(now: number): void {
     if (a.hp <= 0) continue
     const t = a.hp / a.maxHp
     surf.fillStyle = `rgba(${160 + (1 - t) * 60}, ${90 + t * 40}, ${60 + t * 30}, 0.95)`
+    const poly = asteroidModelPolygon(a.model)
     surf.beginPath()
-    surf.arc(a.x, a.y, a.r, 0, Math.PI * 2)
+    const [fx, fy] = poly[0]!
+    surf.moveTo(a.x + fx * a.r, a.y + fy * a.r)
+    for (let i = 1; i < poly.length; i++) {
+      const [px, py] = poly[i]!
+      surf.lineTo(a.x + px * a.r, a.y + py * a.r)
+    }
+    surf.closePath()
     surf.fill()
     surf.strokeStyle = 'rgba(40, 30, 25, 0.5)'
     surf.lineWidth = 2 / worldScale
