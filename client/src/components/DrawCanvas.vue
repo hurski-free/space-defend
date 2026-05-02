@@ -358,7 +358,7 @@ watch(
 function sendGuestInput(now: number): void {
   if (props.solo || props.isHost) return
   if (guestDead) return
-  if (now - lastGuestSend < 45) return
+  if (now - lastGuestSend < 35) return
   lastGuestSend = now
   const ship = guestVisual
   const { x: sx, y: sy } = shipWorldPos(ship)
@@ -383,7 +383,7 @@ function sendGuestInput(now: number): void {
 
 function sendHostSync(now: number): void {
   if (props.solo || !props.isHost) return
-  if (now - lastSyncSent < 75) return
+  if (now - lastSyncSent < 60) return
   lastSyncSent = now
   const msg: StateSyncPayload = {
     channel: CANVAS_CHANNEL,
