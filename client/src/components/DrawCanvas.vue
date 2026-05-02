@@ -1,19 +1,25 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  ARTILLERY_COOLDOWN_MS,
   CANVAS_CHANNEL,
-  ROCKET_COOLDOWN_MS,
   ORBIT_R_MAX,
   PLANET_HP_MAX,
   PLANET_RADIUS,
+  XP_LEVEL_THRESHOLDS,
+  XP_UPGRADE_ARTILLERY_DELTA_MS,
+  XP_UPGRADE_ROCKET_DELTA_MS,
   type Asteroid,
+  effectiveArtilleryCd,
+  effectiveRocketCd,
   type GuestInputPayload,
+  type GuestXpPickPayload,
   type KeysHeld,
   type Projectile,
   type Ship,
+  type ShipXpState,
   type StateSyncPayload,
   type WeaponId,
+  packXpSyncRow,
   ROCKET_DAMAGE,
   extrapolateGuestProjectiles,
   mergeGuestProjectilesRender,
@@ -32,6 +38,7 @@ import {
   tryFire,
   unpackAsteroids,
   unpackProjectiles,
+  unpackXpSyncRow,
   updateAsteroids,
   updateProjectiles,
 } from '../game/planetDefense'
@@ -159,6 +166,12 @@ let gameStartMs = 0
 let frozenElapsedSec: number | null = null
 let score = 0
 
+const hostXp: ShipXpState = { acc: 0, tier: 0, pending: false, artB: 0, rocB: 0 }
+const guestXp: ShipXpState = { acc: 0, tier: 0, pending: false, artB: 0, rocB: 0 }
+
+let plusHitArt: { x: number; y: number; w: number; h: number } | null = null
+let plusHitRoc: { x: number; y: number; w: number; h: number } | null = null
+
 function formatGameTime(totalSec: number): string {
   const s = Math.floor(Math.max(0, totalSec))
   const h = Math.floor(s / 3600)
@@ -198,6 +211,43 @@ function resetGame(): void {
   gameStartMs = performance.now()
   frozenElapsedSec = null
   score = 0
+  hostXp.acc = hostXp.tier = guestXp.acc = guestXp.tier = 0
+  hostXp.pending = guestXp.pending = false
+  hostXp.artB = hostXp.rocB = guestXp.artB = guestXp.rocB = 0
+  plusHitArt = plusHitRoc = null
+}
+
+function xpNeed(tier: number): number | null {
+  if (tier >= XP_LEVEL_THRESHOLDS.length) return null
+  return XP_LEVEL_THRESHOLDS[tier]!
+}
+
+function addXpForProjectileOwner(owner: 0 | 1, inc: number): void {
+  if (!props.solo && !props.isHost) return
+  const st = owner === 0 ? hostXp : guestXp
+  if (st.tier >= XP_LEVEL_THRESHOLDS.length) return
+  if (st.pending) return
+  const need = xpNeed(st.tier)
+  if (need == null) return
+  st.acc += inc
+  if (st.acc >= need) {
+    st.acc = need
+    st.pending = true
+  }
+}
+
+function applyXpChoice(st: ShipXpState, choice: 'art' | 'roc'): boolean {
+  if (!st.pending || st.tier >= XP_LEVEL_THRESHOLDS.length) return false
+  if (choice === 'art') st.artB += XP_UPGRADE_ARTILLERY_DELTA_MS
+  else st.rocB += XP_UPGRADE_ROCKET_DELTA_MS
+  st.pending = false
+  st.acc = 0
+  st.tier += 1
+  return true
+}
+
+function myXp(): ShipXpState {
+  return props.solo || props.isHost ? hostXp : guestXp
 }
 
 function worldFromClient(clientX: number, clientY: number): { x: number; y: number } {
@@ -244,6 +294,11 @@ function onPeerPayload(payload: unknown): void {
     guestLmb = Boolean(payload.lmb)
     return
   }
+  if (props.isHost && kind === 'guest-xp-pick') {
+    const ch = (payload as GuestXpPickPayload).choice
+    if (ch === 'art' || ch === 'roc') applyXpChoice(guestXp, ch)
+    return
+  }
   if (!props.isHost && kind === 'state-sync') {
     const p = payload as StateSyncPayload
     const na = unpackAsteroids(p.A)
@@ -270,6 +325,9 @@ function onPeerPayload(payload: unknown): void {
     guestDead = p.gd === 1
     if (typeof p.score === 'number' && Number.isFinite(p.score)) {
       score = Math.max(0, p.score)
+    }
+    if (Array.isArray(p.xps) && p.xps.length >= 10) {
+      unpackXpSyncRow(p.xps, hostXp, guestXp)
     }
   }
 }
@@ -342,6 +400,7 @@ function sendHostSync(now: number): void {
     score,
     hmx: mouseHostX,
     hmy: mouseHostY,
+    xps: packXpSyncRow(hostXp, guestXp),
   }
   props.sendSignal(msg)
 }
@@ -350,13 +409,43 @@ function fireIfReady(ship: Ship, isGuest: boolean, now: number): void {
   if (isGuest) {
     if (guestDead) return
     if (!guestLmb) return
-    const r = tryFire(ship, guestWx, guestWy, weaponGuest, now, lastArtGuest, lastRocketGuest, projectiles, true)
+    const r = tryFire(
+      ship,
+      guestWx,
+      guestWy,
+      weaponGuest,
+      now,
+      lastArtGuest,
+      lastRocketGuest,
+      projectiles,
+      true,
+      1,
+      {
+        art: effectiveArtilleryCd(guestXp.artB),
+        roc: effectiveRocketCd(guestXp.rocB),
+      },
+    )
     lastArtGuest = r.lastArt
     lastRocketGuest = r.lastRocket
   } else {
     if (hostDead) return
     if (!lmbHost) return
-    const r = tryFire(ship, mouseHostX, mouseHostY, weaponHost, now, lastArtHost, lastRocketHost, projectiles, true)
+    const r = tryFire(
+      ship,
+      mouseHostX,
+      mouseHostY,
+      weaponHost,
+      now,
+      lastArtHost,
+      lastRocketHost,
+      projectiles,
+      true,
+      0,
+      {
+        art: effectiveArtilleryCd(hostXp.artB),
+        roc: effectiveRocketCd(hostXp.rocB),
+      },
+    )
     lastArtHost = r.lastArt
     lastRocketHost = r.lastRocket
   }
@@ -384,8 +473,10 @@ function tick(now: number): void {
     })
     if (hit.hostStruck) hostDead = true
     updateProjectiles(projectiles, dt)
-    collideProjectilesWithAsteroids(projectiles, asteroids, (a) => {
-      score += scoreForDestroyedAsteroid(a)
+    collideProjectilesWithAsteroids(projectiles, asteroids, (a, p) => {
+      const inc = scoreForDestroyedAsteroid(a)
+      score += inc
+      addXpForProjectileOwner(p.own === 1 ? 1 : 0, inc)
     })
     collideProjectilesWithPlanet(projectiles, (dmg) => {
       planetHp = Math.max(0, planetHp - dmg)
@@ -411,8 +502,10 @@ function tick(now: number): void {
     if (hit.hostStruck) hostDead = true
     if (hit.guestStruck) guestDead = true
     updateProjectiles(projectiles, dt)
-    collideProjectilesWithAsteroids(projectiles, asteroids, (a) => {
-      score += scoreForDestroyedAsteroid(a)
+    collideProjectilesWithAsteroids(projectiles, asteroids, (a, p) => {
+      const inc = scoreForDestroyedAsteroid(a)
+      score += inc
+      addXpForProjectileOwner(p.own === 1 ? 1 : 0, inc)
     })
     collideProjectilesWithPlanet(projectiles, (dmg) => {
       planetHp = Math.max(0, planetHp - dmg)
@@ -449,6 +542,11 @@ function tick(now: number): void {
         guestHudRoc,
         dummy,
         false,
+        1,
+        {
+          art: effectiveArtilleryCd(guestXp.artB),
+          roc: effectiveRocketCd(guestXp.rocB),
+        },
       )
       if (hud.fired) {
         guestHudArt = hud.lastArt
@@ -676,27 +774,6 @@ function draw(now: number): void {
     surf.lineTo(2 * v, 0)
     surf.closePath()
     surf.fill()
-    surf.fillStyle = '#f0652a'
-    surf.strokeStyle = '#7a2810'
-    surf.beginPath()
-    surf.moveTo(22 * v, 0)
-    surf.lineTo(30 * v, 0)
-    surf.lineTo(24 * v, 3.2 * v)
-    surf.lineTo(20 * v, 1.2 * v)
-    surf.lineTo(20 * v, -1.2 * v)
-    surf.lineTo(24 * v, -3.2 * v)
-    surf.closePath()
-    surf.fill()
-    surf.stroke()
-    surf.fillStyle = 'rgba(90, 200, 255, 0.45)'
-    surf.strokeStyle = 'rgba(40, 120, 200, 0.35)'
-    surf.beginPath()
-    surf.moveTo(14 * v, 0)
-    surf.lineTo(4 * v, 2.2 * v)
-    surf.lineTo(4 * v, -2.2 * v)
-    surf.closePath()
-    surf.fill()
-    surf.stroke()
     surf.restore()
   }
 
@@ -784,6 +861,7 @@ function draw(now: number): void {
 
   surf.save()
   surf.setTransform(dpr, 0, 0, dpr, 0, 0)
+  plusHitArt = plusHitRoc = null
   surf.font = '13px system-ui, sans-serif'
   surf.fillStyle = 'rgba(232, 234, 239, 0.9)'
   let elapsedSec = (now - gameStartMs) / 1000
@@ -799,20 +877,43 @@ function draw(now: number): void {
   surf.fillText(`Planet: ${Math.round(hp)} / ${PLANET_HP_MAX}`, 14, 38)
   const artCd = props.solo || props.isHost ? lastArtHost : guestHudArt
   const rocCd = props.solo || props.isHost ? lastRocketHost : guestHudRoc
-  const artLeft =
-    artCd === 0 ? 0 : Math.max(0, ARTILLERY_COOLDOWN_MS - (now - artCd)) / 1000
-  const rocLeft = rocCd === 0 ? 0 : Math.max(0, ROCKET_COOLDOWN_MS - (now - rocCd)) / 1000
+  const mxp = myXp()
+  const artEffMs = effectiveArtilleryCd(mxp.artB)
+  const rocEffMs = effectiveRocketCd(mxp.rocB)
+  const artLeft = artCd === 0 ? 0 : Math.max(0, artEffMs - (now - artCd)) / 1000
+  const rocLeft = rocCd === 0 ? 0 : Math.max(0, rocEffMs - (now - rocCd)) / 1000
   const wpn = weaponHost
   const artLabel = `[1] Artillery  ${artLeft > 0.01 ? artLeft.toFixed(1) + 's' : 'ready'}`
   const sep = '   ·   '
   const rocLabel = `[2] Rockets  ${rocLeft > 0.01 ? rocLeft.toFixed(1) + 's' : 'ready'}`
   let hx = 14
   const hy = 58
+  const showXpPlus = mxp.pending
+  const plusS = 20
+  const plusY = hy - 15
   surf.font = wpn === 1 ? '600 13px system-ui, sans-serif' : '13px system-ui, sans-serif'
   surf.fillStyle =
     wpn === 1 ? 'rgba(94, 224, 208, 0.98)' : 'rgba(139, 147, 166, 0.82)'
   surf.fillText(artLabel, hx, hy)
   hx += surf.measureText(artLabel).width
+  if (showXpPlus) {
+    plusHitArt = { x: hx + 4, y: plusY, w: plusS, h: plusS }
+    surf.fillStyle = 'rgba(94, 224, 208, 0.95)'
+    surf.beginPath()
+    surf.roundRect(plusHitArt.x, plusHitArt.y, plusHitArt.w, plusHitArt.h, 4)
+    surf.fill()
+    surf.strokeStyle = 'rgba(0, 0, 0, 0.35)'
+    surf.lineWidth = 1
+    surf.stroke()
+    surf.font = '700 16px system-ui, sans-serif'
+    surf.fillStyle = 'rgba(12, 18, 24, 0.92)'
+    surf.textAlign = 'center'
+    surf.textBaseline = 'middle'
+    surf.fillText('+', plusHitArt.x + plusHitArt.w / 2, plusHitArt.y + plusHitArt.h / 2 + 0.5)
+    surf.textAlign = 'left'
+    surf.textBaseline = 'alphabetic'
+    hx += plusS + 8
+  }
   surf.font = '13px system-ui, sans-serif'
   surf.fillStyle = 'rgba(90, 98, 112, 0.9)'
   surf.fillText(sep, hx, hy)
@@ -821,6 +922,24 @@ function draw(now: number): void {
   surf.fillStyle =
     wpn === 2 ? 'rgba(94, 224, 208, 0.98)' : 'rgba(139, 147, 166, 0.82)'
   surf.fillText(rocLabel, hx, hy)
+  hx += surf.measureText(rocLabel).width
+  if (showXpPlus) {
+    plusHitRoc = { x: hx + 4, y: plusY, w: plusS, h: plusS }
+    surf.fillStyle = 'rgba(94, 224, 208, 0.95)'
+    surf.beginPath()
+    surf.roundRect(plusHitRoc.x, plusHitRoc.y, plusHitRoc.w, plusHitRoc.h, 4)
+    surf.fill()
+    surf.strokeStyle = 'rgba(0, 0, 0, 0.35)'
+    surf.lineWidth = 1
+    surf.stroke()
+    surf.font = '700 16px system-ui, sans-serif'
+    surf.fillStyle = 'rgba(12, 18, 24, 0.92)'
+    surf.textAlign = 'center'
+    surf.textBaseline = 'middle'
+    surf.fillText('+', plusHitRoc.x + plusHitRoc.w / 2, plusHitRoc.y + plusHitRoc.h / 2 + 0.5)
+    surf.textAlign = 'left'
+    surf.textBaseline = 'alphabetic'
+  }
   surf.font = '13px system-ui, sans-serif'
   surf.fillStyle = 'rgba(139, 147, 166, 0.82)'
   surf.fillText('WASD move · hold LMB to fire when ready', 14, 76)
@@ -850,6 +969,47 @@ function draw(now: number): void {
       surf.fillText('Planet lost — defend next time', 14, gy)
     }
   }
+
+  const barPad = 14
+  const barW = Math.min(260, cw - barPad * 2)
+  const barH = 10
+  const barX = barPad
+  const barY = ch - barPad - barH - 4
+  const xNeed = xpNeed(mxp.tier)
+  surf.font = '600 11px system-ui, sans-serif'
+  surf.textAlign = 'left'
+  surf.textBaseline = 'bottom'
+  if (xNeed == null) {
+    surf.fillStyle = 'rgba(180, 188, 202, 0.88)'
+    surf.fillText('XP — max level', barX, barY - 2)
+    surf.fillStyle = 'rgba(0, 0, 0, 0.4)'
+    surf.fillRect(barX, barY, barW, barH)
+    surf.fillStyle = 'rgba(94, 224, 208, 0.45)'
+    surf.fillRect(barX, barY, barW, barH)
+    surf.strokeStyle = 'rgba(255, 255, 255, 0.18)'
+    surf.lineWidth = 1
+    surf.strokeRect(barX, barY, barW, barH)
+  } else {
+    const xFrac = mxp.pending ? 1 : Math.min(1, mxp.acc / xNeed)
+    surf.fillStyle = 'rgba(180, 188, 202, 0.92)'
+    surf.fillText(
+      mxp.pending
+        ? `XP ${Math.round(mxp.acc)} / ${xNeed} — choose upgrade`
+        : `XP ${Math.round(mxp.acc)} / ${xNeed}`,
+      barX,
+      barY - 2,
+    )
+    surf.fillStyle = 'rgba(0, 0, 0, 0.45)'
+    surf.fillRect(barX, barY, barW, barH)
+    surf.fillStyle = mxp.pending
+      ? 'rgba(255, 200, 100, 0.92)'
+      : 'rgba(94, 224, 208, 0.88)'
+    surf.fillRect(barX, barY, Math.max(0, barW * xFrac), barH)
+    surf.strokeStyle = 'rgba(255, 255, 255, 0.2)'
+    surf.lineWidth = 1
+    surf.strokeRect(barX, barY, barW, barH)
+  }
+
   surf.restore()
 }
 
@@ -913,8 +1073,55 @@ function onKeyUp(ev: KeyboardEvent): void {
   }
 }
 
+function canvasClientXY(ev: PointerEvent): { x: number; y: number } | null {
+  const el = canvasRef.value
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  return { x: ev.clientX - r.left, y: ev.clientY - r.top }
+}
+
+function inHudRect(
+  x: number,
+  y: number,
+  b: { x: number; y: number; w: number; h: number },
+): boolean {
+  return x >= b.x && y >= b.y && x <= b.x + b.w && y <= b.y + b.h
+}
+
+function tryXpPlusClick(ev: PointerEvent): boolean {
+  if (gameOver || !myXp().pending) return false
+  const pt = canvasClientXY(ev)
+  if (!pt) return false
+  if (plusHitArt && inHudRect(pt.x, pt.y, plusHitArt)) {
+    if (props.solo || props.isHost) applyXpChoice(hostXp, 'art')
+    else {
+      const msg: GuestXpPickPayload = {
+        channel: CANVAS_CHANNEL,
+        kind: 'guest-xp-pick',
+        choice: 'art',
+      }
+      props.sendSignal(msg)
+    }
+    return true
+  }
+  if (plusHitRoc && inHudRect(pt.x, pt.y, plusHitRoc)) {
+    if (props.solo || props.isHost) applyXpChoice(hostXp, 'roc')
+    else {
+      const msg: GuestXpPickPayload = {
+        channel: CANVAS_CHANNEL,
+        kind: 'guest-xp-pick',
+        choice: 'roc',
+      }
+      props.sendSignal(msg)
+    }
+    return true
+  }
+  return false
+}
+
 function onPointerDown(e: PointerEvent): void {
   if (e.button !== 0) return
+  if (tryXpPlusClick(e)) return
   try {
     canvasRef.value?.setPointerCapture(e.pointerId)
   } catch {

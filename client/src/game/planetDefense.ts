@@ -9,8 +9,23 @@ export const ORBIT_R_MAX = PLANET_RADIUS + 210
 export const SPAWN_R_MIN = 920
 export const SPAWN_R_MAX = 1280
 
-export const ARTILLERY_COOLDOWN_MS = 1000
-export const ROCKET_COOLDOWN_MS = 10_000
+export const ARTILLERY_COOLDOWN_MS = 700
+export const ROCKET_COOLDOWN_MS = 7500
+
+/** XP to earn before each level-up choice (three tiers). */
+export const XP_LEVEL_THRESHOLDS = [500, 1500, 3000] as const
+export const XP_UPGRADE_ARTILLERY_DELTA_MS = 100
+export const XP_UPGRADE_ROCKET_DELTA_MS = 1000
+export const MIN_ARTILLERY_CD_MS = 200
+export const MIN_ROCKET_CD_MS = 2000
+
+export function effectiveArtilleryCd(bonusMs: number): number {
+  return Math.max(MIN_ARTILLERY_CD_MS, ARTILLERY_COOLDOWN_MS - bonusMs)
+}
+
+export function effectiveRocketCd(bonusMs: number): number {
+  return Math.max(MIN_ROCKET_CD_MS, ROCKET_COOLDOWN_MS - bonusMs)
+}
 
 export const ARTILLERY_SPEED = 520
 export const ROCKET_SPEED = 220
@@ -51,6 +66,8 @@ export type Projectile = {
   r: number
   dmg: number
   life: number
+  /** 0 = host projectile, 1 = guest (co-op). */
+  own?: 0 | 1
 }
 
 let nextProjectileId = 1
@@ -202,7 +219,7 @@ export function updateProjectiles(proj: Projectile[], dt: number): void {
 export function collideProjectilesWithAsteroids(
   proj: Projectile[],
   ast: Asteroid[],
-  onAsteroidDestroyed?: (a: Asteroid) => void,
+  onAsteroidDestroyed?: (a: Asteroid, by: Projectile) => void,
 ): void {
   for (const p of proj) {
     if (p.life <= 0) continue
@@ -213,7 +230,7 @@ export function collideProjectilesWithAsteroids(
       if (dx * dx + dy * dy <= (a.r + p.r) * (a.r + p.r)) {
         a.hp -= p.dmg
         p.life = 0
-        if (a.hp <= 0 && onAsteroidDestroyed) onAsteroidDestroyed(a)
+        if (a.hp <= 0 && onAsteroidDestroyed) onAsteroidDestroyed(a, p)
         break
       }
     }
@@ -255,14 +272,18 @@ export function tryFire(
   proj: Projectile[],
   /** If false, only updates cooldowns when a shot would fire (for client HUD / dry-run). */
   spawnProjectiles = true,
+  owner: 0 | 1 = 0,
+  cooldowns?: { art: number; roc: number },
 ): { lastArt: number; lastRocket: number; fired: boolean } {
+  const artCd = cooldowns?.art ?? ARTILLERY_COOLDOWN_MS
+  const rocCd = cooldowns?.roc ?? ROCKET_COOLDOWN_MS
   const { x: sx, y: sy } = shipWorldPos(ship)
   const dir = norm(aimWx - sx, aimWy - sy)
   let fired = false
   let na = lastArt
   let nr = lastRocket
   if (weapon === 1) {
-    if (now - lastArt >= ARTILLERY_COOLDOWN_MS) {
+    if (now - lastArt >= artCd) {
       na = now
       fired = true
       if (spawnProjectiles) {
@@ -275,11 +296,12 @@ export function tryFire(
           r: ARTILLERY_PROJ_R,
           dmg: ARTILLERY_DAMAGE,
           life: 2.4,
+          own: owner,
         })
       }
     }
   } else {
-    if (now - lastRocket >= ROCKET_COOLDOWN_MS) {
+    if (now - lastRocket >= rocCd) {
       nr = now
       fired = true
       if (spawnProjectiles) {
@@ -292,6 +314,7 @@ export function tryFire(
           r: ROCKET_PROJ_R,
           dmg: ROCKET_DAMAGE,
           life: 4.5,
+          own: owner,
         })
       }
     }
@@ -310,6 +333,12 @@ export type GuestInputPayload = {
   wy: number
   lmb: boolean
   wp: WeaponId
+}
+
+export type GuestXpPickPayload = {
+  channel: typeof CANVAS_CHANNEL
+  kind: 'guest-xp-pick'
+  choice: 'art' | 'roc'
 }
 
 export type StateSyncPayload = {
@@ -334,6 +363,11 @@ export type StateSyncPayload = {
   /** Host world aim (for drawing host ship nose on guest). */
   hmx?: number
   hmy?: number
+  /**
+   * XP sync: [hAcc,hTier,hPend,hArtB,hRocB,gAcc,gTier,gPend,gArtB,gRocB]
+   * hPend/gPend: 0 | 1
+   */
+  xps?: number[]
 }
 
 export function packAsteroids(list: Asteroid[]): number[][] {
@@ -364,7 +398,7 @@ export function unpackAsteroids(rows: unknown): Asteroid[] {
 }
 
 export function packProjectiles(list: Projectile[]): number[][] {
-  return list.map((p) => [p.x, p.y, p.vx, p.vy, p.r, p.dmg, p.life, p.id])
+  return list.map((p) => [p.x, p.y, p.vx, p.vy, p.r, p.dmg, p.life, p.id, p.own ?? 0])
 }
 
 export function unpackProjectiles(rows: unknown): Projectile[] {
@@ -373,7 +407,7 @@ export function unpackProjectiles(rows: unknown): Projectile[] {
   let legacyId = 1
   for (const row of rows) {
     if (!Array.isArray(row) || row.length < 7) continue
-    const [x, y, vx, vy, r, dmg, life, idRaw] = row
+    const [x, y, vx, vy, r, dmg, life, idRaw, ownRaw] = row
     if (
       typeof x !== 'number' ||
       typeof y !== 'number' ||
@@ -386,7 +420,8 @@ export function unpackProjectiles(rows: unknown): Projectile[] {
       continue
     }
     const id = typeof idRaw === 'number' && Number.isFinite(idRaw) ? idRaw : legacyId++
-    out.push({ id, x, y, vx, vy, r, dmg, life })
+    const own: 0 | 1 = ownRaw === 1 ? 1 : 0
+    out.push({ id, x, y, vx, vy, r, dmg, life, own })
   }
   return out
 }
@@ -424,6 +459,7 @@ export function mergeGuestProjectilesRender(
       local.r = inc.r
       local.dmg = inc.dmg
       local.life = inc.life
+      local.own = inc.own ?? 0
     }
   }
   for (let i = list.length - 1; i >= 0; i--) {
@@ -435,4 +471,50 @@ export function isGamePayload(p: unknown): p is Record<string, unknown> {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return false
   const o = p as Record<string, unknown>
   return o.channel === CANVAS_CHANNEL
+}
+
+export type ShipXpState = {
+  acc: number
+  tier: number
+  pending: boolean
+  artB: number
+  rocB: number
+}
+
+export function packXpSyncRow(host: ShipXpState, guest: ShipXpState): number[] {
+  return [
+    host.acc,
+    host.tier,
+    host.pending ? 1 : 0,
+    host.artB,
+    host.rocB,
+    guest.acc,
+    guest.tier,
+    guest.pending ? 1 : 0,
+    guest.artB,
+    guest.rocB,
+  ]
+}
+
+export function unpackXpSyncRow(
+  row: unknown,
+  host: ShipXpState,
+  guest: ShipXpState,
+): void {
+  if (!Array.isArray(row) || row.length < 10) return
+  const n = (i: number) => {
+    const v = row[i]
+    return typeof v === 'number' && Number.isFinite(v) ? v : 0
+  }
+  const clampTier = (t: number) => Math.max(0, Math.min(XP_LEVEL_THRESHOLDS.length, Math.floor(t)))
+  host.acc = Math.max(0, n(0))
+  host.tier = clampTier(n(1))
+  host.pending = n(2) !== 0
+  host.artB = Math.max(0, n(3))
+  host.rocB = Math.max(0, n(4))
+  guest.acc = Math.max(0, n(5))
+  guest.tier = clampTier(n(6))
+  guest.pending = n(7) !== 0
+  guest.artB = Math.max(0, n(8))
+  guest.rocB = Math.max(0, n(9))
 }
