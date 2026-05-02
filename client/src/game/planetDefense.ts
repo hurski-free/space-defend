@@ -9,15 +9,15 @@ export const ORBIT_R_MAX = PLANET_RADIUS + 210
 export const SPAWN_R_MIN = 920
 export const SPAWN_R_MAX = 1280
 
-export const ARTILLERY_COOLDOWN_MS = 300
-export const ROCKET_COOLDOWN_MS = 500
+export const ARTILLERY_COOLDOWN_MS = 250
+export const ROCKET_COOLDOWN_MS = 4000
 
 /** XP to earn before each level-up choice (three tiers). */
 export const XP_LEVEL_THRESHOLDS = [500, 1500, 3000] as const
 export const XP_UPGRADE_ARTILLERY_DELTA_MS = 50
 export const XP_UPGRADE_ROCKET_DELTA_MS = 1000
-export const MIN_ARTILLERY_CD_MS = 200
-export const MIN_ROCKET_CD_MS = 2000
+export const MIN_ARTILLERY_CD_MS = 100
+export const MIN_ROCKET_CD_MS = 1000
 
 export function effectiveArtilleryCd(bonusMs: number): number {
   return Math.max(MIN_ARTILLERY_CD_MS, ARTILLERY_COOLDOWN_MS - bonusMs)
@@ -29,14 +29,14 @@ export function effectiveRocketCd(bonusMs: number): number {
 
 export const ARTILLERY_SPEED = 420
 export const ROCKET_SPEED = 220
-export const ARTILLERY_DAMAGE = 0.5
-export const ROCKET_DAMAGE = 10
-export const ARTILLERY_PROJ_R = 3
+export const ARTILLERY_DAMAGE = 1
+export const ROCKET_DAMAGE = 15
+export const ARTILLERY_PROJ_R = 2.5
 export const ROCKET_PROJ_R = 10
 
 /** Planet HP lost when a player projectile hits the planet (friendly fire). */
 export const PLANET_DAMAGE_FROM_ARTILLERY_HIT = 0.5
-export const PLANET_DAMAGE_FROM_ROCKET_HIT = 5
+export const PLANET_DAMAGE_FROM_ROCKET_HIT = 10
 
 export const SHIP_ANGULAR_SPEED = 2.1
 export const SHIP_RADIAL_SPEED = 95
