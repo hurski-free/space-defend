@@ -5,8 +5,9 @@
   "description": "space-defend Server",
   "scripts": {
     "build": "webpack --mode production",
+    "build:watch": "webpack --mode development --watch",
     "serve": "nodemon dist/main.js",
-    "dev": "concurrently \"npm run build:watch\" \"npm run serve\"",
+    "dev": "npm run build && concurrently \"npm run build:watch\" \"npm run serve\"",
     "start": "node dist/main.js",
     "lint": "eslint ."
   },
