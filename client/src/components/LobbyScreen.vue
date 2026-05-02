@@ -25,7 +25,7 @@ const emit = defineEmits<{
 
     <section class="card solo-card">
       <h2 class="section-title">Solo</h2>
-      <p class="solo-hint">Draw on the canvas without a room or network play.</p>
+      <p class="solo-hint">Try solo to defend the planet from asteroids.</p>
       <button type="button" class="btn ghost" @click="emit('startSolo')">Practice alone</button>
     </section>
 
