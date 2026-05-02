@@ -1,0 +1,14 @@
+# Space Defend
+
+Co-op arcade game: defend the planet from asteroids.
+
+## Deploy
+
+| Environment | URL |
+|-------------|-----|
+| **Production** | [https://space-defend.onrender.com/](https://space-defend.onrender.com/) |
+| **Development** | [https://space-defend-develop.onrender.com/](https://space-defend-develop.onrender.com/) |
+
+## Local development
+
+The client and server live in the `client/` and `server/` directories. See each folder’s `README.md` for details.
