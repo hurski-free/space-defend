@@ -76,6 +76,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server, path: WS_PATH });
 
 wss.on("connection", (ws) => {
+  console.log("user connected");
   ws.on("message", (data) => onSocketMessage(ws, data));
   const onGone = (): void => {
     rooms.removeSocket(ws);
