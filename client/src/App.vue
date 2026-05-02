@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import DrawCanvas from './components/DrawCanvas.vue'
 import JoinRoomDialog from './components/JoinRoomDialog.vue'
 import LeaveRoomConfirmDialog from './components/LeaveRoomConfirmDialog.vue'
+import LobbyChat from './components/LobbyChat.vue'
 import LobbyScreen from './components/LobbyScreen.vue'
 import NicknameGate from './components/NicknameGate.vue'
 import RoomLobbyPanel from './components/RoomLobbyPanel.vue'
@@ -26,25 +27,40 @@ function confirmLeaveRoom(): void {
 </script>
 
 <template>
-  <div class="app-root">
+  <div class="app-root" :class="{ 'app-root--game': lobby.gameActive }">
     <header v-if="lobby.nicknameSet" class="nickname-badge">{{ lobby.nickname }}</header>
     <p v-if="lobby.nicknameSet && lobby.onlineCount !== null" class="online-count-badge">
       online: {{ lobby.onlineCount }}
     </p>
 
-    <main v-if="!lobby.gameActive" class="main">
+    <main
+      v-if="!lobby.gameActive"
+      :class="['main', lobby.nicknameSet && !lobby.inRoom ? 'main-lobby-wide' : '']"
+    >
       <NicknameGate v-if="!lobby.nicknameSet" v-model="lobby.nicknameDraft" @submit="lobby.confirmNickname" />
 
-      <LobbyScreen
-        v-else-if="!lobby.inRoom"
-        :connection-error="lobby.connectionError"
-        :action-error="lobby.actionError"
-        v-model:room-name="lobby.roomName"
-        v-model:create-password="lobby.createPassword"
-        :rooms="lobby.rooms"
-        @create-room="lobby.createRoom"
-        @open-join="lobby.openJoinDialog"
-      />
+      <div v-else-if="!lobby.inRoom" class="lobby-split">
+        <div class="lobby-split-main">
+          <LobbyScreen
+            :connection-error="lobby.connectionError"
+            :action-error="lobby.actionError"
+            v-model:room-name="lobby.roomName"
+            v-model:create-password="lobby.createPassword"
+            :rooms="lobby.rooms"
+            @create-room="lobby.createRoom"
+            @open-join="lobby.openJoinDialog"
+            @start-solo="lobby.startSoloGame"
+          />
+        </div>
+        <aside class="card lobby-split-chat">
+          <LobbyChat
+            :messages="lobby.chatMessages"
+            :current-nickname="lobby.nickname"
+            :cooldown-seconds="lobby.chatCooldownSeconds"
+            @send="lobby.sendChatMessage"
+          />
+        </aside>
+      </div>
 
       <RoomLobbyPanel
         v-else
@@ -59,16 +75,25 @@ function confirmLeaveRoom(): void {
     </main>
 
     <div v-else class="game-layout">
-      <p v-if="lobby.actionError" class="banner error">{{ lobby.actionError }}</p>
-      <div class="row game-actions">
-        <button type="button" class="btn ghost" @click="requestLeaveRoom">Leave room</button>
+      <div class="game-toolbar row">
+        <p v-if="lobby.actionError" class="banner error game-toolbar-msg">{{ lobby.actionError }}</p>
+        <button
+          v-if="lobby.soloMode"
+          type="button"
+          class="btn ghost"
+          @click="lobby.leaveSoloGame"
+        >
+          Back to lobby
+        </button>
+        <button v-else type="button" class="btn ghost" @click="requestLeaveRoom">Leave room</button>
       </div>
       <DrawCanvas
+        :game-session-id="lobby.gameSessionId"
         :is-host="lobby.isHost"
+        :solo="lobby.soloMode"
         :send-signal="lobby.sendPeerSignal"
         :peer-signal="lobby.peerSignal"
       />
-      <p class="game-hint">Left-click the canvas to draw a circle. Positions are normalized to the canvas size.</p>
     </div>
 
     <JoinRoomDialog
@@ -84,11 +109,24 @@ function confirmLeaveRoom(): void {
       @cancel="cancelLeaveRoom"
       @confirm="confirmLeaveRoom"
     />
+
+    <footer class="dev-contact-badge">
+      <span class="dev-contact-label">Developer contact</span>
+      <a class="dev-contact-mail" href="mailto:hurski.free@gmail.com">hurski.free@gmail.com</a>
+    </footer>
   </div>
 </template>
 
 <style scoped>
-.game-actions {
+.game-toolbar {
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.game-toolbar-msg {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 </style>

@@ -4,6 +4,11 @@ import { parseServerMessage, wsUrl } from '../protocol'
 
 export type RoomListItem = { roomId: string; displayName: string; hasPassword: boolean }
 
+export type ChatMessageItem = { id: string; at: string; nickname: string; text: string }
+
+const MAX_CHAT_CLIENT = 200
+const CHAT_COOLDOWN_MS = 10_000
+
 const CANVAS_CHANNEL = 'space-defend-canvas'
 const NICKNAME_STORAGE_KEY = 'space-defend-nickname'
 
@@ -44,6 +49,10 @@ export function useLobbyWs() {
   const connectionError = ref<string | null>(null)
   const actionError = ref<string | null>(null)
   const onlineCount = ref<number | null>(null)
+  const chatMessages = ref<ChatMessageItem[]>([])
+  const chatCooldownUntil = ref(0)
+  const chatCooldownSeconds = ref(0)
+  let chatCooldownTick: ReturnType<typeof setInterval> | null = null
 
   const inRoom = ref(false)
   const isHost = ref(false)
@@ -51,6 +60,9 @@ export function useLobbyWs() {
   const currentRoomTitle = ref('')
   const peerNickname = ref<string | null>(null)
   const gameActive = ref(false)
+  const soloMode = ref(false)
+  /** Incremented when a new play session starts (solo / host start / guest receives game-start). */
+  const gameSessionId = ref(0)
 
   const peerSignal = ref<{ seq: number; payload: unknown } | null>(null)
   let signalSeq = 0
@@ -71,7 +83,12 @@ export function useLobbyWs() {
   function startListPolling(): void {
     stopListPolling()
     listTimer = setInterval(() => {
-      if (ws?.readyState === WebSocket.OPEN && nicknameSet.value && !inRoom.value) {
+      if (
+        ws?.readyState === WebSocket.OPEN &&
+        nicknameSet.value &&
+        !inRoom.value &&
+        !gameActive.value
+      ) {
         send({ type: 'list-rooms' })
       }
     }, 2500)
@@ -85,6 +102,27 @@ export function useLobbyWs() {
 
   function sendPeerSignal(payload: unknown): void {
     send({ type: 'signal', payload })
+  }
+
+  function refreshChatCooldownSeconds(): void {
+    chatCooldownSeconds.value = Math.max(0, Math.ceil((chatCooldownUntil.value - Date.now()) / 1000))
+  }
+
+  function startChatCooldownTimer(): void {
+    stopChatCooldownTimer()
+    refreshChatCooldownSeconds()
+    if (chatCooldownSeconds.value <= 0) return
+    chatCooldownTick = setInterval(() => {
+      refreshChatCooldownSeconds()
+      if (chatCooldownSeconds.value <= 0) stopChatCooldownTimer()
+    }, 1000)
+  }
+
+  function stopChatCooldownTimer(): void {
+    if (chatCooldownTick) {
+      clearInterval(chatCooldownTick)
+      chatCooldownTick = null
+    }
   }
 
   function connectSocket(): void {
@@ -121,7 +159,9 @@ export function useLobbyWs() {
   }
 
   function handleServer(msg: ServerMessage): void {
-    actionError.value = null
+    if (msg.type !== 'chat-message' && msg.type !== 'chat-history') {
+      actionError.value = null
+    }
     switch (msg.type) {
       case 'online-count':
         onlineCount.value = typeof msg.count === 'number' && Number.isFinite(msg.count) ? Math.max(0, msg.count) : 0
@@ -156,6 +196,7 @@ export function useLobbyWs() {
         break
       case 'signal': {
         if (isGameStartPayload(msg.payload) && !isHost.value) {
+          gameSessionId.value += 1
           gameActive.value = true
         }
         signalSeq += 1
@@ -169,8 +210,46 @@ export function useLobbyWs() {
         resetLobbyAfterLeave()
         actionError.value = 'Room closed (host left)'
         break
+      case 'chat-history': {
+        if (!Array.isArray(msg.messages)) break
+        const seen = new Set(chatMessages.value.map((m) => m.id))
+        for (const row of msg.messages) {
+          if (!row || typeof row !== 'object') continue
+          const r = row as Record<string, unknown>
+          if (
+            typeof r.id !== 'string' ||
+            typeof r.at !== 'string' ||
+            typeof r.nickname !== 'string' ||
+            typeof r.text !== 'string'
+          ) {
+            continue
+          }
+          if (seen.has(r.id)) continue
+          seen.add(r.id)
+          chatMessages.value.push({ id: r.id, at: r.at, nickname: r.nickname, text: r.text })
+        }
+        break
+      }
+      case 'chat-message':
+        if (!chatMessages.value.some((m) => m.id === msg.id)) {
+          chatMessages.value.push({
+            id: msg.id,
+            at: msg.at,
+            nickname: msg.nickname,
+            text: msg.text,
+          })
+        }
+        break
       case 'error':
         actionError.value = msg.message
+        if (msg.code === 'chat-cooldown') {
+          const m = /^Wait (\d+)s\b/.exec(msg.message)
+          const sec = m
+            ? Math.min(CHAT_COOLDOWN_MS / 1000, Math.max(1, Number(m[1]) || 10))
+            : 10
+          chatCooldownUntil.value = Date.now() + sec * 1000
+          startChatCooldownTimer()
+        }
         break
       default:
         break
@@ -238,8 +317,32 @@ export function useLobbyWs() {
     send({ type: 'leave-room' })
   }
 
+  function startSoloGame(): void {
+    actionError.value = null
+    gameSessionId.value += 1
+    soloMode.value = true
+    gameActive.value = true
+    isHost.value = true
+    peerSignal.value = null
+  }
+
+  function leaveSoloGame(): void {
+    soloMode.value = false
+    gameActive.value = false
+  }
+
+  function sendChatMessage(text: string): void {
+    if (Date.now() < chatCooldownUntil.value) return
+    const t = text.trim().slice(0, MAX_CHAT_CLIENT)
+    if (!t) return
+    chatCooldownUntil.value = Date.now() + CHAT_COOLDOWN_MS
+    startChatCooldownTimer()
+    send({ type: 'chat-send', nickname: nickname.value, text: t })
+  }
+
   function startGame(): void {
     if (!isHost.value || peerNickname.value === null) return
+    gameSessionId.value += 1
     gameActive.value = true
     sendPeerSignal({ channel: CANVAS_CHANNEL, kind: 'game-start' })
   }
@@ -248,6 +351,12 @@ export function useLobbyWs() {
 
   watch(nicknameSet, (set) => {
     if (!set && ws) {
+      soloMode.value = false
+      gameActive.value = false
+      chatMessages.value = []
+      chatCooldownUntil.value = 0
+      chatCooldownSeconds.value = 0
+      stopChatCooldownTimer()
       onlineCount.value = null
       ws.close()
       ws = null
@@ -257,6 +366,7 @@ export function useLobbyWs() {
 
   onBeforeUnmount(() => {
     stopListPolling()
+    stopChatCooldownTimer()
     ws?.close()
   })
 
@@ -270,12 +380,16 @@ export function useLobbyWs() {
     connectionError,
     actionError,
     onlineCount,
+    chatMessages,
+    chatCooldownSeconds,
     inRoom,
     isHost,
     currentRoomId,
     currentRoomTitle,
     peerNickname,
     gameActive,
+    soloMode,
+    gameSessionId,
     peerSignal,
     joinTarget,
     joinPassword,
@@ -287,6 +401,9 @@ export function useLobbyWs() {
     confirmJoin,
     leaveRoom,
     startGame,
+    startSoloGame,
+    leaveSoloGame,
+    sendChatMessage,
     sendPeerSignal,
   })
 }

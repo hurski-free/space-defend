@@ -3,7 +3,8 @@ export type ClientMessage =
   | { type: "list-rooms" }
   | { type: "join-room"; roomId: string; guestUsername?: string; password?: string }
   | { type: "signal"; payload: unknown }
-  | { type: "leave-room" };
+  | { type: "leave-room" }
+  | { type: "chat-send"; nickname: string; text: string };
 
 export type ServerMessage =
   | { type: "room-created"; roomId: string; displayName: string; password?: string }
@@ -28,7 +29,12 @@ export type ServerMessage =
   | { type: "peer-left" }
   | { type: "room-closed"; reason: string }
   | { type: "left-room" }
-  | { type: "online-count"; count: number };
+  | { type: "online-count"; count: number }
+  | {
+      type: "chat-history";
+      messages: Array<{ id: string; at: string; nickname: string; text: string }>;
+    }
+  | { type: "chat-message"; id: string; at: string; nickname: string; text: string };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -77,6 +83,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return {
         type: "leave-room",
       };
+    case "chat-send":
+      if (typeof data.nickname !== "string" || typeof data.text !== "string") return null;
+      return { type: "chat-send", nickname: data.nickname, text: data.text };
     default:
       return null;
   }

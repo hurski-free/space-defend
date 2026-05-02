@@ -14,13 +14,20 @@ const emit = defineEmits<{
   'update:createPassword': [v: string]
   createRoom: []
   openJoin: [room: RoomListItem]
+  startSolo: []
 }>()
 </script>
 
 <template>
-  <div>
+  <div class="lobby-screen">
     <p v-if="connectionError" class="banner error">{{ connectionError }}</p>
     <p v-else-if="actionError" class="banner error">{{ actionError }}</p>
+
+    <section class="card solo-card">
+      <h2 class="section-title">Solo</h2>
+      <p class="solo-hint">Draw on the canvas without a room or network play.</p>
+      <button type="button" class="btn ghost" @click="emit('startSolo')">Practice alone</button>
+    </section>
 
     <section class="card">
       <h2 class="section-title">Create a room</h2>
@@ -62,3 +69,16 @@ const emit = defineEmits<{
     </section>
   </div>
 </template>
+
+<style scoped>
+.solo-hint {
+  margin: 0 0 1rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.solo-card {
+  margin-bottom: 0.25rem;
+}
+</style>
