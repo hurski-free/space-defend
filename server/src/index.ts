@@ -13,6 +13,17 @@ function send(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === 1) ws.send(JSON.stringify(msg));
 }
 
+function broadcastOnlineCount(clients: Iterable<WebSocket>): void {
+  let count = 0;
+  for (const c of clients) {
+    if (c.readyState === 1) count += 1;
+  }
+  const payload = JSON.stringify({ type: "online-count", count } satisfies ServerMessage);
+  for (const c of clients) {
+    if (c.readyState === 1) c.send(payload);
+  }
+}
+
 function onSocketMessage(ws: WebSocket, raw: RawData): void {
   const text = typeof raw === "string" ? raw : raw.toString("utf8");
   const msg = parseClientMessage(text);
@@ -66,8 +77,13 @@ const wss = new WebSocketServer({ server, path: WS_PATH });
 
 wss.on("connection", (ws) => {
   ws.on("message", (data) => onSocketMessage(ws, data));
-  ws.on("close", () => rooms.removeSocket(ws));
-  ws.on("error", () => rooms.removeSocket(ws));
+  const onGone = (): void => {
+    rooms.removeSocket(ws);
+    queueMicrotask(() => broadcastOnlineCount(wss.clients));
+  };
+  ws.on("close", onGone);
+  ws.on("error", onGone);
+  queueMicrotask(() => broadcastOnlineCount(wss.clients));
 });
 
 server.listen(port, () => {

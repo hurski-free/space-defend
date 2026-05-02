@@ -27,7 +27,8 @@ export type ServerMessage =
   | { type: "error"; code: string; message: string }
   | { type: "peer-left" }
   | { type: "room-closed"; reason: string }
-  | { type: "left-room" };
+  | { type: "left-room" }
+  | { type: "online-count"; count: number };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

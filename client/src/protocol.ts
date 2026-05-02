@@ -2,6 +2,7 @@ export type ClientMessage =
   | { type: 'create-room'; hostUsername: string; displayName: string; password?: string }
   | { type: 'list-rooms' }
   | { type: 'join-room'; roomId: string; guestUsername: string; password?: string }
+  | { type: 'signal'; payload: unknown }
   | { type: 'leave-room' }
 
 export type ServerMessage =
@@ -18,9 +19,11 @@ export type ServerMessage =
       hostUsername: string
     }
   | { type: 'peer-joined'; peerUsername: string }
+  | { type: 'signal'; payload: unknown }
   | { type: 'peer-left' }
   | { type: 'room-closed'; reason: string }
   | { type: 'left-room' }
+  | { type: 'online-count'; count: number }
   | { type: 'error'; code: string; message: string }
 
 export function parseServerMessage(raw: string): ServerMessage | null {
