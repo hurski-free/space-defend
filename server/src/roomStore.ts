@@ -77,6 +77,7 @@ export class RoomStore {
   
     att.roomId = id;
     att.role = "host";
+    console.log("room created", id, name);
     return { type: "room-created", roomId: id, displayName: name, password };
   }
 
