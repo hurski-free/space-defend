@@ -7,6 +7,33 @@ import { RoomStore } from "./roomStore";
 const port = Number(process.env.PORT) || 3000;
 const WS_PATH = "/ws";
 
+/** Origins allowed for browser HTTP (ping API, etc.). Set on Render, e.g. `https://space-defend-develop.onrender.com` or comma-separated list. If unset, CORS uses `*`. */
+function allowedCorsOrigins(): string[] {
+  const raw = process.env.SITE_DOMAIN;
+  if (!raw?.trim()) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+}
+
+const CORS_ALLOWED = allowedCorsOrigins();
+console.log('CORS_ALLOWED: ', CORS_ALLOWED);
+
+function corsHeaders(req: http.IncomingMessage): Record<string, string> {
+  if (CORS_ALLOWED.length === 0) {
+    return { "Access-Control-Allow-Origin": "*" };
+  }
+  const origin = req.headers.origin;
+  if (typeof origin === "string") {
+    const o = origin.trim().replace(/\/+$/, "");
+    if (CORS_ALLOWED.includes(o)) {
+      return { "Access-Control-Allow-Origin": origin, Vary: "Origin" };
+    }
+  }
+  return {};
+}
+
 const rooms = new RoomStore();
 
 function send(ws: WebSocket, msg: ServerMessage): void {
@@ -64,12 +91,29 @@ function onSocketMessage(ws: WebSocket, raw: RawData): void {
 }
 
 const server = http.createServer((req, res) => {
+  const cors = corsHeaders(req);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      ...cors,
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Accept",
+      "Access-Control-Max-Age": "86400",
+    });
+    res.end();
+    return;
+  }
   if (req.url === "/" || req.url === "") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      ...cors,
+    });
     res.end(JSON.stringify({ ok: true, wsPath: WS_PATH }));
     return;
   }
-  res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+  res.writeHead(404, {
+    "Content-Type": "text/plain; charset=utf-8",
+    ...cors,
+  });
   res.end("not found");
 });
 
